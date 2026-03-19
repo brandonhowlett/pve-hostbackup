@@ -33,7 +33,7 @@ Compatible with **PVE 7.x, 8.x, and 9.x**.
 
 ```bash
 # On your Proxmox host
-git clone https://github.com/YOUR_USERNAME/pve-hostbackup.git
+git clone https://github.com/brandonhowlett/pve-hostbackup.git
 cd pve-hostbackup
 sudo bash install.sh
 ```
