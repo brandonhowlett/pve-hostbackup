@@ -1,0 +1,25 @@
+# Sensitive files — never commit these
+backup.key
+*.key
+*.pem
+*.p12
+
+# OS / editor noise
+.DS_Store
+*.swp
+*.swo
+*~
+.idea/
+.vscode/
+
+# Test artifacts
+/tmp/
+pve-restore-preview/
+pve-hostbackup-work*/
+
+# Compiled / generated
+*.tar.gz
+*.tar.zst
+*.tar.zst.age
+*.sha256
+*.sha512

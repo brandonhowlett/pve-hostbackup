@@ -1,0 +1,25 @@
+[Unit]
+Description=Proxmox Host Configuration Backup
+Documentation=https://github.com/YOUR_USERNAME/pve-hostbackup
+After=network-online.target pve-cluster.service
+Wants=network-online.target
+Requires=pve-cluster.service
+
+[Service]
+Type=oneshot
+User=root
+Group=root
+ExecStart=/usr/local/sbin/pve-hostbackup.sh
+TimeoutStartSec=1800
+Restart=no
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=pve-hostbackup
+PrivateTmp=no
+ProtectKernelModules=yes
+ProtectControlGroups=yes
+NoNewPrivileges=yes
+OnFailure=pve-hostbackup-notify-fail.service
+
+[Install]
+WantedBy=multi-user.target

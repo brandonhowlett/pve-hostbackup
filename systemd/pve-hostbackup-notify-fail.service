@@ -1,0 +1,11 @@
+[Unit]
+Description=Notify on PVE Host Backup Failure
+After=network-online.target
+
+[Service]
+Type=oneshot
+User=root
+ExecStart=/usr/local/sbin/pve-hostbackup-notify-fail.sh
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=pve-hostbackup-notify
