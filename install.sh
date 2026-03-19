@@ -13,7 +13,7 @@ INSTALL_LIB="/usr/local/lib/pve-hostbackup"
 INSTALL_CONF="/etc/pve-hostbackup"
 SYSTEMD_DIR="/etc/systemd/system"
 
-C_GREEN='\033[0;32m'; C_YELLOW='\033[1;33m'
+C_GREEN='\033[0;32m'; C_YELLOW='\033[1;33m'; C_CYAN='\033[0;36m'
 C_RED='\033[0;31m'; C_BOLD='\033[1m'; C_RESET='\033[0m'
 
 _log()  { echo -e "${C_BOLD}[INSTALL]${C_RESET} $*"; }
