@@ -3,7 +3,7 @@
 # install.sh — pve-hostbackup v3 Installer
 # Run as root on your Proxmox host:
 #   git clone https://github.com/YOUR_USERNAME/pve-hostbackup.git
-#   cd pve-hostbackup && sudo bash install.sh
+#   cd pve-hostbackup && bash install.sh
 # =============================================================================
 
 set -euo pipefail
