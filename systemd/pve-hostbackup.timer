@@ -3,15 +3,20 @@ Description=Proxmox Host Configuration Backup — Timer
 Documentation=https://github.com/YOUR_USERNAME/pve-hostbackup
 
 [Timer]
-# Run on boot if the last scheduled run was missed (e.g. host was powered off)
+# Run a missed backup on next boot (host may have been off at scheduled time)
 Persistent=true
-# First run: 10 minutes after boot (allows PVE services to fully initialise)
+
+# First run: 10 minutes after boot (PVE services need time to settle)
 OnBootSec=10min
-# Subsequent runs: every N days. Keep this in sync with BACKUP_INTERVAL_DAYS in the config.
-# 1d = daily, 3d = every 3 days (default), 7d = weekly
+
+# Interval: must match BACKUP_INTERVAL_DAYS in pve-hostbackup.conf
+# After editing: systemctl daemon-reload && systemctl restart pve-hostbackup.timer
+# 1d = daily | 3d = every 3 days | 7d = weekly
 OnUnitActiveSec=3d
-# Randomise start time by up to 30 minutes to avoid simultaneous runs on multiple hosts
-RandomizedDelaySec=1800
+
+# Spread start time ±15 minutes to avoid precise midnight hammering
+RandomizedDelaySec=900
+
 Unit=pve-hostbackup.service
 
 [Install]

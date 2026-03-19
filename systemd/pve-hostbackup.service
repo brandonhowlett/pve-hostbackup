@@ -15,7 +15,6 @@ Restart=no
 StandardOutput=journal
 StandardError=journal
 SyslogIdentifier=pve-hostbackup
-PrivateTmp=no
 ProtectKernelModules=yes
 ProtectControlGroups=yes
 NoNewPrivileges=yes
