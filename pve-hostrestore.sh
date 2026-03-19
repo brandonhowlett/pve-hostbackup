@@ -95,8 +95,8 @@ done
 _confirm() {
     local prompt="${1:-Continue?}"
     [[ "${FORCE}" == true ]] && return 0
-    read -rp "$(echo -e "${C_YELLOW}${prompt} [yes/N]: ${C_RESET}")" ans
-    [[ "${ans}" == "yes" ]]
+    read -rp "$(echo -e "${C_YELLOW}${prompt} [y/N]: ${C_RESET}")" ans
+    [[ "${ans}" =~ ^[Yy] ]]
 }
 
 _print_header() {

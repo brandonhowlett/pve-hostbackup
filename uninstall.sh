@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # =============================================================================
 # uninstall.sh — pve-hostbackup removal
-# Run as root: sudo bash uninstall.sh
+# Run as root: bash uninstall.sh
 # This removes all installed files but does NOT delete backup archives.
 # =============================================================================
 
@@ -18,8 +18,8 @@ _warn() { echo -e "${C_YELLOW}[ WARN ]${C_RESET} $*"; }
 
 echo -e "\n${C_BOLD}pve-hostbackup Uninstaller${C_RESET}\n"
 echo -e "${C_YELLOW}This removes all installed files. Backup archives are NOT deleted.${C_RESET}\n"
-read -rp "Continue? [yes/N]: " _ans
-[[ "${_ans}" == "yes" ]] || { echo "Aborted."; exit 0; }
+read -rp "Continue? [y/N]: " _ans
+[[ "${_ans}" =~ ^[Yy] ]] || { echo "Aborted."; exit 0; }
 
 # Stop and disable timer
 _log "Disabling systemd timer..."
@@ -44,12 +44,12 @@ _ok "Scripts removed."
 rm -rf "/usr/local/lib/pve-hostbackup"
 _ok "Library removed."
 
-# Config — ask before removing (contains passphrase key file)
+# Config — ask before removing (may contain encryption passphrase file)
 echo ""
 _warn "Config directory: /etc/pve-hostbackup"
 _warn "This may contain your encryption passphrase file (.archive-key)."
-read -rp "Remove config directory? [yes/N]: " _ans2
-if [[ "${_ans2}" == "yes" ]]; then
+read -rp "Remove config directory? [y/N]: " _ans2
+if [[ "${_ans2}" =~ ^[Yy] ]]; then
     rm -rf "/etc/pve-hostbackup"
     _ok "Config directory removed."
 else
