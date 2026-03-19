@@ -1,303 +1,321 @@
 # pve-hostbackup
 
-**Proxmox VE host configuration backup and restore suite.**
+A production-grade backup and restore suite for **Proxmox VE host configuration**.
 
-Proxmox VE has no native mechanism to back up the *host* configuration — the node itself, not the VMs and containers it runs. This tool fills that gap. It captures everything needed to fully restore a Proxmox host to a fresh install: network config, storage definitions, VM/CT configs, SSH keys, cron jobs, firewall rules, and more.
+Compatible with PVE **7.x, 8.x, and 9.x+**. Designed for single-node installations and for migrating between major versions (e.g. 8.x → 9.x).
 
-Compatible with **PVE 7.x, 8.x, and 9.x**.
-
----
-
-## Features
-
-- **Consistent `/etc/pve` snapshots** — briefly quiesces `pmxcfs` (the PVE cluster filesystem) and copies its backing SQLite database for a guaranteed dirty-read-free snapshot
-- **Tiered storage** — writes to NFS → ZFS → local directory in priority order, using `pvesm` (the official PVE API) for storage resolution
-- **Archive encryption** — optional `age`-based symmetric encryption; key stored separately from archives
-- **SHA-256 integrity** — checksum written after every archive, verified before every restore
-- **Pruning after success** — old archives only pruned once the new backup is fully committed and verified
-- **Systemd-native** — timer with `Persistent=true` (catches missed runs after reboots), `OnFailure=` handler for crash-level alerts
-- **Safe config parsing** — config is never `source`d/`eval`'d; parsed with `grep`/`sed` to prevent privilege escalation via config file tampering
-- **Interactive restore wizard** — phased restore with dry-run preview, SSH key cleanup, permission restoration, and post-restore checklist
+> **Why does this exist?** Proxmox has excellent tooling for backing up VMs and containers via `vzdump`, but no native mechanism to back up the *host itself* — its network config, storage definitions, user accounts, firewall rules, and VM/LXC configuration metadata. This suite fills that gap.
 
 ---
 
 ## Quick start
 
-### Prerequisites
+If you just want to get up and running, follow these four steps. Everything else in this document is reference material.
 
-- Proxmox VE 7.x, 8.x, or 9.x
-- Root access to the Proxmox host
-- `git` installed (`apt-get install -y git`)
+### Step 1 — Install git and clone
 
-### Install
+Proxmox does not ship with `git` by default. Run these commands in the Proxmox shell (the terminal in the web UI, or SSH):
 
 ```bash
-# On your Proxmox host
-git clone https://github.com/brandonhowlett/pve-hostbackup.git
+apt install git
+git clone https://github.com/YOUR_USERNAME/pve-hostbackup.git
 cd pve-hostbackup
-sudo bash install.sh
+```
+
+> **Note:** Proxmox runs as `root` by default. There is no `sudo` on a standard Proxmox installation — just paste commands directly. If you see `sudo: command not found`, simply remove the word `sudo` from the command.
+
+### Step 2 — Run the installer
+
+```bash
+bash install.sh
 ```
 
 The installer will:
-1. Check for and install required packages (`zstd`, `flock`, `rsync`)
-2. Offer to install optional packages (`age` for encryption, `jq` for pretty manifests)
-3. Install scripts, library, config, and systemd units with correct permissions
-4. Enable and start the backup timer
-5. Run a dry-run to verify the configuration
+- Check for required tools and install any that are missing (`jq`, `age`)
+- Copy all scripts and config files into place
+- Enable the backup timer so backups run automatically
+- Print your available storage IDs at the end so you know what to put in the config
 
-### Configure
+### Step 3 — Edit the config
+
+The installer prints your storage list at the end. Use that to fill in the config:
 
 ```bash
-sudo nano /etc/pve-hostbackup/pve-hostbackup.conf
+nano /etc/pve-hostbackup/pve-hostbackup.conf
 ```
 
-Minimum required settings:
+The two settings you must change:
 
 ```bash
-# Your PVE storage ID as shown in `pvesm status`
-NFS_STORAGE_ID="nfs-backup"
+# Set this to a Name from `pvesm status` — e.g. "BackupUSB" or "nfs-backup"
+# If you have no dedicated backup storage, leave this empty ("") and use
+# LOCAL_BACKUP_PATH below instead.
+NFS_STORAGE_ID="BackupUSB"
 
-# Email for notifications (requires working Postfix on the host)
-EMAIL_RECIPIENT="admin@example.com"
+# Only used if NFS_STORAGE_ID is empty. This path must already exist.
+LOCAL_BACKUP_PATH="/var/lib/pve-hostbackup"
+
+# Your email address for notifications (optional but recommended)
+EMAIL_RECIPIENT="you@example.com"
 ```
 
-### Run your first backup
+To save and exit nano: press `Ctrl+X`, then `Y`, then `Enter`.
+
+### Step 4 — Verify and run your first backup
 
 ```bash
-# Dry-run — no files written, no services touched
+# Safe simulation — reads your config and shows what would happen, writes nothing
 pve-hostbackup --dry-run
 
-# Real backup
+# Run a real backup
 pve-hostbackup
 
-# List all archives
+# Confirm it was stored
 pve-hostbackup --list
-
-# Verify a specific archive
-pve-hostbackup --verify /path/to/archive.tar.zst
 ```
+
+That's it. Backups will now run automatically every 3 days (configurable).
 
 ---
 
-## Archive encryption (recommended)
+## Choosing a backup destination
 
-Archives contain SSH private keys, TLS certificates, and PVE API tokens. Encrypt them, especially if the destination is a shared NFS server.
+Run `pvesm status` to see your available storages:
 
-```bash
-# Generate a passphrase file
-head -c 48 /dev/urandom | base64 | sudo tee /etc/pve-hostbackup/backup.key
-sudo chmod 400 /etc/pve-hostbackup/backup.key
-
-# Enable in config
-sudo sed -i 's/ENCRYPT_ARCHIVES="false"/ENCRYPT_ARCHIVES="true"/' \
-    /etc/pve-hostbackup/pve-hostbackup.conf
+```
+Name          Type     Status    Total      Used       Available   %
+BackupUSB     dir      active    7658084    4662384    2586104     60%
+local         dir      active    93052672   13854848   79197824    14%
+local-zfs     zfspool  active    95263824   16065888   79197936    16%
+nfs-backup    nfs      active    ...
 ```
 
-> **Important:** Store `backup.key` somewhere other than the backup destination. If the NFS share is compromised and the key is also on it, encryption is worthless. Keep a copy offline.
-
----
-
-## Restore procedure
-
-### After reinstalling Proxmox VE
-
-```bash
-# 1. Fresh-install PVE on the target host (same or newer version)
-
-# 2. Copy the archive to the new host
-scp /mnt/nfs/pve-host-backups/pvehost-myhost-*.tar.zst root@new-host:/tmp/
-
-# 3. Copy the restore script (or clone the repo)
-scp pve-hostrestore.sh root@new-host:/tmp/
-
-# 4. SSH into the new host and run the wizard
-ssh root@new-host
-bash /tmp/pve-hostrestore.sh --archive /tmp/pvehost-myhost-*.tar.zst
-```
-
-### Dry-run a restore (safe)
-
-```bash
-# Extracts to /tmp/pve-restore-preview — does NOT touch the system
-bash pve-hostrestore.sh --archive /path/to/archive.tar.zst --dry-run
-
-# Inspect what would have been written
-ls -la /tmp/pve-restore-preview/
-```
-
-### Restore options
-
-| Flag | Effect |
+| Your situation | What to set |
 |---|---|
-| `--archive FILE` | Skip interactive selection |
-| `--dry-run` | Extract to `/tmp/pve-restore-preview` only |
-| `--no-network` | Skip `/etc/network` restore (useful if NIC names differ) |
-| `--no-zfs` | Skip ZFS pool import guidance |
-| `--force` | Skip confirmation prompts |
+| You have a dedicated NFS share or USB drive appearing in `pvesm status` | Set `NFS_STORAGE_ID` to its exact Name (e.g. `"BackupUSB"`) |
+| You only have `local` or `local-zfs` | Leave `NFS_STORAGE_ID=""` and set `LOCAL_BACKUP_PATH` to a path on that storage |
+| You have a ZFS dataset you want to use directly | Leave `NFS_STORAGE_ID=""` and set `ZFS_BACKUP_PATH` to the dataset's mountpoint |
+
+Backups stored on the same physical disk as your OS are not a true backup — if the disk fails you lose everything. A USB drive, NFS share, or separate ZFS pool on different hardware is strongly recommended.
 
 ---
 
-## Scheduling
+## Features
 
-The systemd timer runs automatically. To inspect:
+- **Atomic, consistent `/etc/pve` backup** — stops `pve-cluster` briefly to flush `pmxcfs` to its SQLite backing database (`config.db`), then snapshots that file. Eliminates dirty reads from the FUSE filesystem.
+- **Tiered storage** — PVE storage ID → ZFS dataset → local directory, resolved via `pvesm path` (official API)
+- **Archive encryption** — `age` (recommended) or `openssl` AES-256-CBC
+- **Integrity verification** — SHA-256 checksum + `tar -t` readability test on every backup and before every restore
+- **Phased, safe restore** — stops `pve-cluster` first, extracts in dependency order, restores file permissions explicitly, backs up new host SSH keys before overwriting
+- **ifreload validation** — validates restored network config before allowing reboot
+- **Systemd-native** — timer with `Persistent=true`, `OnFailure=` handler for crash notifications
+- **Dual notifications** — email (Postfix/sendmail) + PVE built-in notification system (PVE 8.1+)
+- **Security hardened** — config parsed (not sourced), `flock`-based locking, secure temp dirs (`chmod 700`)
+- **Configurable retention** — keep N backups; prune runs *after* new backup is confirmed good
+- **Free-space gate** — aborts before writing if destination has insufficient space
+- **Dry-run on both backup and restore** — safe to test at any time
+
+---
+
+## What gets backed up
+
+| Path | Contents |
+|---|---|
+| `/var/lib/pve-cluster/config.db` | pmxcfs SQLite snapshot — the authoritative source for all `/etc/pve` data |
+| `/etc/pve` + `/etc/pve/priv` | VM/LXC configs, storage definitions, users, ACLs, firewall rules, API tokens |
+| `/etc/vzdump.conf` | Backup job definitions |
+| `/etc/network/interfaces{,.d/}` | Network configuration |
+| `/etc/hostname`, `/etc/hosts`, `/etc/fstab`, `/etc/resolv.conf` | System identity and mounts |
+| `/etc/ssh`, `/root/.ssh` | SSH host keys and authorized keys |
+| `/var/lib/pve-{manager,daemon,proxy,firewall}` | PVE runtime state |
+| `/var/lib/pve-manager/apl-info` | Container template index |
+| `/etc/cron.*`, `/var/spool/cron` | Scheduled jobs |
+| `/usr/local/{bin,sbin,etc}` | Custom scripts |
+| `/etc/systemd/system`, `/etc/systemd/network` | Custom units and network configs |
+| `/etc/apt/sources.list{,.d/,.preferences.d/}` | Repository configuration |
+| `/etc/postfix`, `/etc/fail2ban`, `/etc/ssl/private` | Mail, security, TLS |
+| ZFS metadata | `zpool list/status/zfs list` — import commands for restore |
+
+---
+
+## Requirements
+
+- Proxmox VE 7.x, 8.x, or 9.x
+- Root access (standard on Proxmox — no `sudo` needed)
+- `tar`, `zstd`, `sha256sum`, `flock`, `awk` — all present on PVE by default
+- `jq` — optional, for pretty-printed manifests (installer will offer to install it)
+- `age` — optional, for archive encryption (installer will offer to install it)
+
+---
+
+## Full command reference
+
+### Backup
 
 ```bash
-# Show next scheduled run
-systemctl list-timers pve-hostbackup.timer
-
-# Watch live log output
-journalctl -u pve-hostbackup.service -f
-
-# View the log file
-tail -f /var/log/pve-hostbackup.log
+pve-hostbackup                        # run backup now
+pve-hostbackup --dry-run              # simulate — no files written, safe at any time
+pve-hostbackup --list                 # list all stored backups with sizes and dates
+pve-hostbackup --verify /path/to.tar.zst  # verify a specific archive
+pve-hostbackup --verbose              # show every file being processed
+pve-hostbackup --dest /mnt/usb        # override backup destination
 ```
 
-To change the backup interval, update **both**:
+### Restore
+
+```bash
+# Interactive wizard — select from a list of available backups
+pve-hostrestore
+
+# Restore a specific archive (--pmxcfs-restore gives the most complete restore)
+pve-hostrestore --archive /path/to/pvehost-backup.tar.zst --pmxcfs-restore
+
+# Safe preview — extracts to a temp directory, no system files touched
+pve-hostrestore --archive /path/to/archive.tar.zst --dry-run
+
+# Skip network config (useful when restoring to different hardware with different NIC names)
+pve-hostrestore --archive /path/to/archive.tar.zst --no-network
+```
+
+### Schedule and logs
+
+```bash
+systemctl list-timers pve-hostbackup.timer    # show next scheduled run time
+journalctl -u pve-hostbackup.service -f       # watch live log output
+journalctl -u pve-hostbackup.service --since '7 days ago'
+cat /var/log/pve-hostbackup.log               # full log file
+```
+
+To change the backup interval, edit **both** of these to keep them in sync:
 
 1. `BACKUP_INTERVAL_DAYS` in `/etc/pve-hostbackup/pve-hostbackup.conf`
 2. `OnUnitActiveSec` in `/etc/systemd/system/pve-hostbackup.timer`
 
 Then reload:
+```bash
+systemctl daemon-reload && systemctl restart pve-hostbackup.timer
+```
+
+---
+
+## Enabling encryption (optional but recommended)
+
+Archives contain SSH private keys, TLS certificates, and PVE API tokens. If your backup destination is a shared NFS or accessible USB drive, encrypting archives means that physical access to the drive cannot compromise your host.
 
 ```bash
-systemctl daemon-reload
-systemctl restart pve-hostbackup.timer
+# Generate a random passphrase file (or use your own passphrase)
+head -c 48 /dev/urandom | base64 > /etc/pve-hostbackup/.archive-key
+chmod 400 /etc/pve-hostbackup/.archive-key
+
+# Enable encryption in the config
+nano /etc/pve-hostbackup/pve-hostbackup.conf
+# Set: ENCRYPT_ARCHIVE=true
+```
+
+The encryption key file must be stored separately from your backup archives — keep a copy in a password manager or on a different machine. Without it, encrypted backups cannot be restored.
+
+---
+
+## PVE 8.x → 9.x Migration
+
+```bash
+# ── On your existing PVE 8.x host ─────────────────────────────────────────
+
+# Run a fresh backup immediately before migrating
+pve-hostbackup
+pve-hostbackup --list   # note the archive path
+
+# Copy the archive somewhere safe if using local storage
+# (if using NFS the archive is already on the share)
+scp /var/lib/pve-hostbackup/pvehost-*.tar.zst user@somewhere:/safe/
+
+
+# ── On the new PVE 9.x host (after fresh install) ─────────────────────────
+
+apt install git
+git clone https://github.com/YOUR_USERNAME/pve-hostbackup.git
+cd pve-hostbackup
+
+# Copy the archive back if needed
+# scp user@somewhere:/safe/pvehost-*.tar.zst /tmp/
+
+# Run the restore wizard
+pve-hostrestore --archive /tmp/pvehost-*.tar.zst --pmxcfs-restore
+
+# Follow the checklist printed at the end, then reboot
 ```
 
 ---
 
-## What is backed up
+## Archive format
 
-| Path / source | Contents |
-|---|---|
-| `pmxcfs` SQLite DB | All of `/etc/pve` — VM configs, LXC configs, storage definitions, users, ACLs, HA config, firewall rules |
-| `/etc/pve` tree | Live FUSE tree copy (quiesced, for inspection on restore) |
-| `/var/lib/pve-*` | PVE runtime state databases |
-| `/etc/network` | Network interface configuration |
-| `/etc/hostname`, `/etc/hosts`, `/etc/fstab` | System identity and mounts |
-| `/etc/ssh` + `/root/.ssh` | SSH host keys and authorized keys |
-| `/var/spool/cron` + `/etc/cron.*` | Scheduled jobs |
-| `/usr/local/bin\|sbin\|etc` | Custom scripts |
-| `/etc/apt` | Repository sources |
-| `/etc/postfix` | Mail transport config |
-| `/etc/systemd/system` | Custom systemd units |
-| `/etc/vzdump.conf` | PVE backup job configuration |
-| `/etc/proxmox-backup` | PBS client config |
-| `/etc/fail2ban` | Security tooling |
-| `/etc/ssl/private` | TLS private keys |
-| `/etc/pve-hostbackup` | This tool's own config (survives reinstall) |
-| ZFS metadata text file | `zpool list`, `zpool status`, `zfs list`, import commands |
+Each backup produces three files alongside each other:
+
+```
+pvehost-<hostname>-<pve-version>-<YYYYMMDD-HHMMSS>.tar.zst         ← the archive
+pvehost-<hostname>-<pve-version>-<YYYYMMDD-HHMMSS>.tar.zst.sha256  ← checksum
+pvehost-<hostname>-<pve-version>-<YYYYMMDD-HHMMSS>.manifest.json   ← metadata
+```
+
+With encryption enabled, the archive becomes `.tar.zst.enc` and the checksum covers the encrypted file.
+
+The manifest records: hostname, PVE version, kernel, timestamp, included paths, network interface snapshot, `pvesm status` output, and restore procedure steps.
 
 ---
 
-## Architecture
+## Security notes
 
-```
-pve-hostbackup/
-├── install.sh                          # One-shot installer
-├── pve-hostbackup.conf                 # All configuration (safe key=value format)
-├── pve-hostbackup-lib.sh               # Shared library (sourced, not executed)
-├── pve-hostbackup.sh                   # Backup script
-├── pve-hostrestore.sh                  # Restore wizard
-└── systemd/
-    ├── pve-hostbackup.service          # Systemd service
-    ├── pve-hostbackup.timer            # Systemd timer (Persistent=true)
-    └── pve-hostbackup-notify-fail.service  # OnFailure= handler
-```
-
-**Installed locations:**
-
-| File | Destination |
-|---|---|
-| `pve-hostbackup-lib.sh` | `/usr/local/lib/pve-hostbackup/` |
-| `pve-hostbackup.sh` | `/usr/local/sbin/pve-hostbackup.sh` |
-| `pve-hostrestore.sh` | `/usr/local/sbin/pve-hostrestore.sh` |
-| `pve-hostbackup.conf` | `/etc/pve-hostbackup/pve-hostbackup.conf` |
-| Systemd units | `/etc/systemd/system/` |
-| Log file | `/var/log/pve-hostbackup.log` |
-
----
-
-## Storage priority
-
-The backup script resolves the destination in this order:
-
-1. **NFS/pvesm storage** (`NFS_STORAGE_ID`) — uses `pvesm path` (official PVE API); works for `dir`, `nfs`, `cifs`, and `zfspool` storage types
-2. **ZFS path** (`ZFS_BACKUP_PATH`) — an explicit directory path on a ZFS dataset
-3. **Local fallback** (`LOCAL_BACKUP_PATH`) — local filesystem; not protected against host disk failure
-
-A warning is logged and emailed when falling back to a lower-priority tier.
+- The config file is `chmod 600 root:root` and is **parsed, not sourced** — editing it cannot cause code execution
+- All temporary work is done in `mktemp -d` directories with `chmod 700` — not visible to other users
+- Locking uses `flock(1)` — atomic, no race condition
+- Archives contain sensitive material (SSH keys, PVE tokens) — enable encryption and restrict destination permissions
 
 ---
 
 ## Notifications
 
-Two notification channels are supported simultaneously:
+### Email (Postfix)
+Set `EMAIL_ENABLED=true` and `EMAIL_RECIPIENT`. Requires working Postfix on the host (standard on most PVE installs).
 
-**Email (Postfix/sendmail)**
-```bash
-EMAIL_ENABLED="true"
-EMAIL_RECIPIENT="admin@example.com"
-```
-Requires a working Postfix installation. Test with:
-```bash
-echo "test" | sendmail -v admin@example.com
-```
+### PVE built-in notifications (PVE 8.1+)
+Set `PVE_NOTIFY_ENABLED=true`. Configure a notification target in the PVE web UI under **Datacenter → Notifications**, then set `PVE_NOTIFY_TARGET` to its name.
 
-**Proxmox built-in notifications (PVE 8.1+)**
+Control when you get notified:
 ```bash
-PVE_NOTIFY_ENABLED="true"
-PVE_NOTIFY_TARGET="mail-to-root"
-```
-Configure notification targets under **Datacenter → Notifications** in the PVE web UI.
-
-**Filter by event:**
-```bash
-NOTIFY_ON="all"      # success and failure (default)
-NOTIFY_ON="failure"  # failures only (quieter)
-NOTIFY_ON="success"  # successes only
+NOTIFY_ON="failure"  # only on failure — recommended to reduce noise
+NOTIFY_ON="all"      # both success and failure
+NOTIFY_ON="success"  # only on success
 ```
 
 ---
 
-## PVE 8.x → 9.x migration
+## File structure
 
-```bash
-# On the existing PVE 8.x host — run a fresh backup
-pve-hostbackup
-pve-hostbackup --list   # confirm the archive is there
-
-# Note the archive path; copy it to safe storage (USB, another host, etc.)
-
-# Install PVE 9.x fresh on the target hardware
-
-# Copy the archive and restore script to the new host
-scp pvehost-myhost-*.tar.zst root@new-host:/tmp/
-scp pve-hostrestore.sh root@new-host:/tmp/
-
-# Run the restore
-ssh root@new-host
-bash /tmp/pve-hostrestore.sh --archive /tmp/pvehost-myhost-*.tar.zst
-
-# Verify, then reboot
-pvesm status && qm list && pct list
-reboot
+```
+pve-hostbackup/
+├── install.sh                              # Installer
+├── uninstall.sh                            # Removal script
+├── pve-hostbackup.conf                     # All configuration settings
+├── pve-hostbackup-lib.sh                   # Shared library (not run directly)
+├── pve-hostbackup.sh                       # Backup script
+├── pve-hostrestore.sh                      # Restore wizard
+├── systemd/
+│   ├── pve-hostbackup.service              # Systemd service unit
+│   ├── pve-hostbackup.timer                # Systemd timer (schedule)
+│   └── pve-hostbackup-notify-fail.service  # Failure notification handler
+└── README.md
 ```
 
----
+After installation, files live at:
 
-## Uninstall
-
-```bash
-systemctl disable --now pve-hostbackup.timer pve-hostbackup.service
-rm -f /etc/systemd/system/pve-hostbackup{.service,.timer,-notify-fail.service}
-rm -f /usr/local/sbin/pve-hostbackup{,.sh}
-rm -f /usr/local/sbin/pve-hostrestore{,.sh}
-rm -f /usr/local/sbin/pve-hostbackup-notify-fail.sh
-rm -rf /usr/local/lib/pve-hostbackup
-# Remove config and key (destructive — keep your backup.key somewhere safe first!)
-# rm -rf /etc/pve-hostbackup
-systemctl daemon-reload
+```
+/usr/local/sbin/pve-hostbackup          ← run this to take a backup
+/usr/local/sbin/pve-hostrestore         ← run this to restore
+/usr/local/lib/pve-hostbackup/          ← shared library
+/etc/pve-hostbackup/pve-hostbackup.conf ← your configuration
+/etc/pve-hostbackup/.archive-key        ← encryption passphrase (if used)
+/etc/systemd/system/pve-hostbackup.*    ← systemd units
+/var/log/pve-hostbackup.log             ← log file
 ```
 
 ---
@@ -306,54 +324,40 @@ systemctl daemon-reload
 
 | Problem | Solution |
 |---|---|
-| "No writable backup destination" | Run `pvesm status` and set `NFS_STORAGE_ID` to exactly match the storage name in the first column |
-| Archive fails post-write verification | Check disk space on destination; check for NFS timeouts in `dmesg` |
-| pmxcfs quiesce takes too long | Set `STOP_PMXCFS_FOR_BACKUP="false"` (accepts dirty-read risk) |
-| "Config file must be owned by root" | `chown root:root /etc/pve-hostbackup/pve-hostbackup.conf` |
-| "Config file must not be group/world-writable" | `chmod 640 /etc/pve-hostbackup/pve-hostbackup.conf` |
-| Email not sending | `echo test \| sendmail -v root`; check `journalctl -u postfix` |
-| PVE web UI won't start after restore | `systemctl status pve-cluster pvedaemon pveproxy`; check `/var/log/syslog` |
-| ZFS pools missing after restore | `zpool import -a -f` |
-| SSH fingerprint warning after restore | Expected — the host key changed. Run `ssh-keygen -R <host>` on the client. |
-| Timer not firing | `systemctl status pve-hostbackup.timer`; `journalctl -u pve-hostbackup` |
+| `sudo: command not found` | Proxmox runs as root — just remove `sudo` from the command |
+| `"No writable backup destination"` | Check `NFS_STORAGE_ID` exactly matches the Name in `pvesm status` |
+| `"Config file is group/world-writable"` | Run: `chmod 600 /etc/pve-hostbackup/pve-hostbackup.conf` |
+| `"Config file must be owned by root"` | Run: `chown root:root /etc/pve-hostbackup/pve-hostbackup.conf` |
+| Archive fails integrity check | Re-run backup; check available space on destination with `df -h` |
+| Email not sending | Test with: `echo test \| sendmail -v root@localhost` |
+| PVE notify fails | Check the target name in PVE web UI → Datacenter → Notifications |
+| Timer not firing | `systemctl status pve-hostbackup.timer` and `journalctl -u pve-hostbackup` |
+| Restore: web UI won't start | Fix permissions: `chmod 700 /etc/pve && chown root:root /etc/pve` |
+| Restore: wrong NIC names | Use `--no-network` and edit `/etc/network/interfaces` manually |
+| ifreload validation fails | NIC names likely differ on new hardware — check `ip link show` |
+| Encrypted archive won't open | Verify `age` is installed and the passphrase file path is correct |
 
 ---
 
-## Security considerations
+## Uninstall
 
-- The config file is parsed safely — never `source`d or `eval`'d — so a world-writable config cannot escalate to root code execution
-- The installer enforces `chmod 640 root:root` on the config
-- The work directory (`/tmp/pve-hostbackup-XXXXXX`) is created with `chmod 700` immediately — staging sensitive files is never world-readable
-- Archives contain SSH private keys and PVE API tokens — **enable `ENCRYPT_ARCHIVES`** if the backup destination is shared
-- The encryption key (`backup.key`) must be stored separately from the archive destination
+```bash
+bash uninstall.sh
+```
+
+This removes all installed scripts and config. Backup archives are **never deleted**.
 
 ---
 
 ## Contributing
 
-Pull requests are welcome. Before submitting:
-
-```bash
-# Syntax check all scripts
-bash -n pve-hostbackup-lib.sh
-bash -n pve-hostbackup.sh
-bash -n pve-hostrestore.sh
-bash -n install.sh
-
-# Optional: shellcheck (apt-get install shellcheck)
-shellcheck -x pve-hostbackup.sh pve-hostrestore.sh install.sh
-```
+Issues and pull requests are welcome. When reporting a bug, please include:
+- PVE version: `pveversion`
+- Installer or backup log: `journalctl -u pve-hostbackup.service`
+- The manifest from the affected archive (redact hostnames/IPs as needed)
 
 ---
 
 ## License
 
-MIT License. See [LICENSE](LICENSE) for details.
-
----
-
-## Acknowledgements
-
-- [Proxmox VE](https://www.proxmox.com) — the platform this tool supports
-- [age encryption](https://age-encryption.org) — the encryption backend
-- [zstd](https://facebook.github.io/zstd/) — the compression backend
+MIT License. See `LICENSE` for details.
