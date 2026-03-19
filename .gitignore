@@ -1,25 +1,24 @@
-# Sensitive files — never commit these
-backup.key
-*.key
-*.pem
-*.p12
-
-# OS / editor noise
-.DS_Store
+# Editor artifacts
+.vscode/
+.idea/
 *.swp
 *.swo
 *~
-.idea/
-.vscode/
 
-# Test artifacts
+# macOS
+.DS_Store
+.AppleDouble
+
+# Local test output
 /tmp/
-pve-restore-preview/
-pve-hostbackup-work*/
-
-# Compiled / generated
-*.tar.gz
 *.tar.zst
-*.tar.zst.age
+*.tar.gz
+*.enc
 *.sha256
-*.sha512
+*.manifest.json
+
+# Secrets — never commit these
+.archive-key
+*.key
+*.pem
+*.p12
